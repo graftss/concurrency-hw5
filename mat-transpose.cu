@@ -3,7 +3,9 @@
 #include <sys/time.h>
 
 #define BLOCK_SIZE 4
-#define N 8
+#define N 2000
+
+#define CHUNK_SIZE (BLOCK_SIZE * BLOCK_SIZE)
 
 __global__ void transpose_2D2D(float *A, float *B) {
   int col = blockIdx.x * blockDim.x + threadIdx.x;
@@ -15,19 +17,30 @@ __global__ void transpose_2D2D(float *A, float *B) {
 }
 
 __global__ void transpose_shmem(float *A, float *B) {
-  __shared__ float chunk[BLOCK_SIZE * BLOCK_SIZE];
+  __shared__ float chunk[CHUNK_SIZE * CHUNK_SIZE];
 
-  int col = blockIdx.x * blockDim.x + threadIdx.x;
-  int row = blockIdx.y * blockDim.y + threadIdx.y;
-  float val = A[col + row * N];
+  int col_chunk = blockIdx.x * CHUNK_SIZE;
+  int row_chunk = blockIdx.y * CHUNK_SIZE;
 
-  printf("%d %d %.3f\n", col, row, val);
+  int col = col_chunk;
+  int row_offset = threadIdx.y * BLOCK_SIZE + threadIdx.x;
+  int chunk_offset = CHUNK_SIZE * row_offset;
+  int row = row_chunk + row_offset;
+  int A_offset = row * N + col;
 
-  // copy row of A into chunk
-  chunk[BLOCK_SIZE * threadIdx.y + threadIdx.x] = A[col + row * N];
+  for (int k = 0; k < CHUNK_SIZE; k++) {
+    chunk[chunk_offset + k] = A[A_offset + k];
+  }
+
   __syncthreads();
 
-  B[col + row * N] = chunk[BLOCK_SIZE * threadIdx.x + threadIdx.y];
+  int row_out = row_chunk;
+  int col_out = col_chunk + row_offset;
+  int out = col_out * N + row_out;
+
+  for (int k = 0; k < CHUNK_SIZE; k++) {
+    B[out + k] = chunk[row_offset + CHUNK_SIZE * k];
+  }  
 }
 
 void print_matrix(float *A) {
@@ -101,7 +114,7 @@ int main() {
   gettimeofday(&t0, NULL);
 
   dim3 block_shmem (BLOCK_SIZE, BLOCK_SIZE);
-  dim3 grid_shmem (ceil((float) N / block_shmem.x), ceil((float) N / block_shmem.y));
+  dim3 grid_shmem (ceil((float) N / CHUNK_SIZE), ceil((float) N / CHUNK_SIZE));
 
   transpose_shmem<<<grid_shmem, block_shmem>>>(d_A, d_C);
   cudaDeviceSynchronize();
