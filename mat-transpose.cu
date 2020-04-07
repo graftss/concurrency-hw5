@@ -2,8 +2,8 @@
 #include <stdlib.h>
 #include <sys/time.h>
 
-#define BLOCK_SIZE 16
-#define N 5
+#define BLOCK_SIZE 4
+#define N 8
 
 __global__ void transpose_2D2D(float *A, float *B) {
   int col = blockIdx.x * blockDim.x + threadIdx.x;
@@ -11,10 +11,26 @@ __global__ void transpose_2D2D(float *A, float *B) {
 
   if (col < N && row < N) {
      B[row + col * N] = A[col + row * N];
-  }
+  } 
 }
 
-void print_matrix(float *A) {
+__global__ void transpose_shmem(float *A, float *B) {
+  __shared__ float chunk[BLOCK_SIZE * BLOCK_SIZE];
+
+  int col = blockIdx.x * blockDim.x + threadIdx.x;
+  int row = blockIdx.y * blockDim.y + threadIdx.y;
+  float val = A[col + row * N];
+
+  printf("%d %d %.3f\n", col, row, val);
+
+  // copy row of A into chunk
+  chunk[BLOCK_SIZE * threadIdx.y + threadIdx.x] = A[col + row * N];
+  __syncthreads();
+
+  B[col + row * N] = chunk[BLOCK_SIZE * threadIdx.x + threadIdx.y];
+}
+
+__global__ void print_matrix(float *A) {
   for (int i = 0; i < N * N; i++) {
     printf("%.3f ", A[i]);
     if (i % N == N - 1) printf("\n");
@@ -35,15 +51,26 @@ double diff_ms(struct timeval t0, struct timeval t1) {
   return (t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_usec - t0.tv_usec) / 1000.0;
 }
 
+void print_results(char* label, float *A, float *B, struct timeval t0, struct timeval t1) {
+  int success = check_transpose(A, B);
+
+  printf(
+    "%s -- status: %s, time: %lf ms\n", 
+    label,
+    success ? "success" : "failure", 
+    diff_ms(t0, t1)
+  );
+}
+
 int main() {
   struct timeval t0, t1;
-  int success;
   size_t size = sizeof(float) * N * N;
 
   // step 1: allocate memory in GPU
-  float *d_A, *d_B;
+  float *d_A, *d_B, *d_C;
   cudaMalloc((void**) &d_A, size);
   cudaMalloc((void**) &d_B, size);
+  cudaMalloc((void**) &d_C, size);
 
   // step 2: allocate memory in CPU
   float *h_A, *h_B;
@@ -56,26 +83,37 @@ int main() {
   cudaMemcpy(d_A, h_A, size, cudaMemcpyHostToDevice);
 
   // steps 4-5: invoke kernel routine, transfer results
-  dim3 block_structure (BLOCK_SIZE, BLOCK_SIZE);
-  dim3 grid_structure (ceil(N * N / block_structure.x), ceil(N * N / block_structure.y));
 
+  // 2D2D implementation
   gettimeofday(&t0, NULL);
-  transpose_2D2D<<<grid_structure, block_structure>>>(d_A, d_B);
+
+  dim3 block_2D2D (BLOCK_SIZE, BLOCK_SIZE);
+  dim3 grid_2D2D (ceil((float) N / block_2D2D.x), ceil((float) N / block_2D2D.y));
+
+  transpose_2D2D<<<grid_2D2D, block_2D2D>>>(d_A, d_B);
   cudaDeviceSynchronize();  
   cudaMemcpy(h_B, d_B, size, cudaMemcpyDeviceToHost);
+
   gettimeofday(&t1, NULL);
+  print_results("2D2D", h_A, h_B, t0, t1);
 
-  success = check_transpose(h_A, h_B);
+  // shared memory implementation
+  gettimeofday(&t0, NULL);
 
-  printf(
-    "2D2D -- status: %s, time: %lf ms\n", 
-    success ? "success" : "failure", 
-    diff_ms(t0, t1)
-  );
+  dim3 block_shmem (BLOCK_SIZE, BLOCK_SIZE);
+  dim3 grid_shmem (ceil((float) N / block_shmem.x), ceil((float) N / block_shmem.y));
+
+  transpose_shmem<<<grid_shmem, block_shmem>>>(d_A, d_C);
+  cudaDeviceSynchronize();
+  cudaMemcpy(h_B, d_C, size, cudaMemcpyDeviceToHost);
+
+  gettimeofday(&t1, NULL);
+  print_results("shared memory", h_A, h_B, t0, t1);
 
   // step 6: free memory in GPU
   cudaFree(d_A);
   cudaFree(d_B);
+  cudaFree(d_C);
 
   // step 7: free memory in CPU
   free(h_A);
