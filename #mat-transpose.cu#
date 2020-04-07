@@ -2,8 +2,8 @@
 #include <stdlib.h>
 #include <sys/time.h>
 
-#define BLOCK_SIZE 4
-#define N 8
+#define BLOCK_SIZE 2
+#define N 4
 
 __global__ void transpose_2D2D(float *A, float *B) {
   int col = blockIdx.x * blockDim.x + threadIdx.x;
@@ -23,7 +23,10 @@ __global__ void transpose_shmem(float *A, float *B) {
 
   printf("%d %d %.3f\n", col, row, val);
 
-  // copy row of A into chunk
+  if (col < N && row < N) {
+     for (int k = 0; 
+  }
+
   chunk[BLOCK_SIZE * threadIdx.y + threadIdx.x] = A[col + row * N];
   __syncthreads();
 
@@ -101,7 +104,7 @@ int main() {
   gettimeofday(&t0, NULL);
 
   dim3 block_shmem (BLOCK_SIZE, BLOCK_SIZE);
-  dim3 grid_shmem (ceil((float) N / block_shmem.x), ceil((float) N / block_shmem.y));
+  dim3 grid_shmem (ceil((float) N / block_shmem.x));
 
   transpose_shmem<<<grid_shmem, block_shmem>>>(d_A, d_C);
   cudaDeviceSynchronize();
@@ -109,6 +112,10 @@ int main() {
 
   gettimeofday(&t1, NULL);
   print_results("shared memory", h_A, h_B, t0, t1);
+
+  //print_matrix(h_A);
+  //printf("\n\n");
+  //print_matrix(h_B);
 
   // step 6: free memory in GPU
   cudaFree(d_A);
